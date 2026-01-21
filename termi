@@ -30,7 +30,7 @@ PROVIDERS = {
         "requires_key": True
     },
     "anthropic": {
-        "suggested_models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-haiku-20241022"],
+        "suggested_models": ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001", "claude-opus-4-5-20251101", "claude-sonnet-4-20250514"],
         "api_url": "https://api.anthropic.com/v1/messages",
         "env_key": "ANTHROPIC_API_KEY",
         "requires_key": True
@@ -337,7 +337,19 @@ def load_config():
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
+                config = json.load(f)
+                # Ensure permissions fields exist
+                if "auto_execute_all" not in config:
+                    config["auto_execute_all"] = False
+                if "allowed_prefixes" not in config:
+                    config["allowed_prefixes"] = []
+                # Ensure api_keys dict exists (for per-provider key storage)
+                if "api_keys" not in config:
+                    config["api_keys"] = {}
+                    # Migrate old single api_key to new format
+                    if config.get("api_key") and config.get("provider"):
+                        config["api_keys"][config["provider"]] = config["api_key"]
+                return config
         except (json.JSONDecodeError, IOError):
             return None
     return None
@@ -349,6 +361,178 @@ def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
     os.chmod(CONFIG_FILE, 0o600)  # Secure the file
+
+
+def update_permissions(config, auto_execute_all=None, allowed_prefixes=None):
+    """Update just the permissions in config and save."""
+    if auto_execute_all is not None:
+        config["auto_execute_all"] = auto_execute_all
+    if allowed_prefixes is not None:
+        config["allowed_prefixes"] = list(allowed_prefixes)
+    save_config(config)
+
+
+def clear_screen():
+    """Clear terminal screen."""
+    # Use escape sequences first, then os.system as backup
+    sys.stdout.write("\033[2J\033[H")  # Clear screen + move to home
+    sys.stdout.write("\033[3J")  # Clear scrollback buffer
+    sys.stdout.flush()
+
+
+def manage_permissions(config):
+    """Interactive menu to manage command permissions."""
+    message = None  # Status message to show after action
+    selected = 0
+
+    while True:
+        auto_all = config.get("auto_execute_all", False)
+        prefixes = list(config.get("allowed_prefixes", []))
+
+        # Build options
+        options = ["Toggle auto-execute ALL", "Add allowed prefix"]
+        if prefixes:
+            options.append("Remove allowed prefix")
+            options.append("Clear all prefixes")
+        options.append("Exit")
+
+        # Ensure selected is within bounds
+        if selected >= len(options):
+            selected = 0
+
+        sys.stdout.write("\033[?25l")  # Hide cursor
+
+        try:
+            while True:
+                # Build screen content
+                lines = []
+                lines.append(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
+                lines.append(f"{BOLD}{CYAN}  Command Permissions{RESET}")
+                lines.append(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
+                lines.append("")
+                lines.append(f"{BOLD}Current settings:{RESET}")
+                if auto_all:
+                    lines.append(f"  {GREEN}✓ Auto-execute ALL commands{RESET}")
+                else:
+                    lines.append(f"  {DIM}✗ Auto-execute all: disabled{RESET}")
+                lines.append("")
+                if prefixes:
+                    lines.append(f"{BOLD}Allowed prefixes:{RESET}")
+                    for i, p in enumerate(prefixes, 1):
+                        lines.append(f"  {CYAN}{i}.{RESET} {p}...")
+                else:
+                    lines.append(f"{DIM}No allowed prefixes configured{RESET}")
+
+                if message:
+                    lines.append("")
+                    lines.append(message)
+
+                lines.append("")
+                lines.append(f"{BOLD}Actions:{RESET} {DIM}(↑↓ navigate, Enter select, q quit){RESET}")
+                lines.append("")
+                for i, opt in enumerate(options):
+                    if i == selected:
+                        lines.append(f"  {GREEN}❯ {opt}{RESET}")
+                    else:
+                        lines.append(f"    {DIM}{opt}{RESET}")
+
+                # Clear and draw
+                clear_screen()
+                print("\n".join(lines))
+                sys.stdout.flush()
+
+                # Get input
+                key = get_key()
+
+                if key == 'UP' or key == 'k':
+                    selected = (selected - 1) % len(options)
+                elif key == 'DOWN' or key == 'j':
+                    selected = (selected + 1) % len(options)
+                elif key == '\r' or key == '\n':
+                    break
+                elif key == 'q' or key == '\x03':
+                    sys.stdout.write("\033[?25h")
+                    clear_screen()
+                    return config
+
+            sys.stdout.write("\033[?25h")  # Show cursor
+
+            choice = options[selected]
+            message = None  # Clear previous message
+
+            if choice == "Exit":
+                clear_screen()
+                return config
+
+            elif choice == "Toggle auto-execute ALL":
+                config["auto_execute_all"] = not auto_all
+                save_config(config)
+                status = "ENABLED" if config["auto_execute_all"] else "DISABLED"
+                message = f"{GREEN}✓ Auto-execute all: {status}{RESET}"
+
+            elif choice == "Add allowed prefix":
+                clear_screen()
+                sys.stdout.write("\033[?25h")
+                print(f"{BOLD}{CYAN}Add Allowed Prefix{RESET}\n")
+                new_prefix = input(f"{CYAN}Enter command prefix (e.g., 'ls', 'git status'): {RESET}").strip()
+                if new_prefix:
+                    if new_prefix not in prefixes:
+                        config["allowed_prefixes"] = prefixes + [new_prefix]
+                        save_config(config)
+                        message = f"{GREEN}✓ Added '{new_prefix}'{RESET}"
+                    else:
+                        message = f"{YELLOW}'{new_prefix}' already exists{RESET}"
+
+            elif choice == "Remove allowed prefix":
+                remove_idx = 0
+                remove_options = prefixes + ["← Cancel"]
+
+                while True:
+                    # Build remove menu
+                    lines = []
+                    lines.append(f"{BOLD}{CYAN}Remove Prefix{RESET}")
+                    lines.append(f"{DIM}(↑↓ navigate, Enter select){RESET}")
+                    lines.append("")
+                    for i, opt in enumerate(remove_options):
+                        if i == remove_idx:
+                            lines.append(f"  {GREEN}❯ {opt}{RESET}")
+                        else:
+                            lines.append(f"    {DIM}{opt}{RESET}")
+
+                    clear_screen()
+                    print("\n".join(lines))
+                    sys.stdout.flush()
+
+                    key = get_key()
+                    if key == 'UP' or key == 'k':
+                        remove_idx = (remove_idx - 1) % len(remove_options)
+                    elif key == 'DOWN' or key == 'j':
+                        remove_idx = (remove_idx + 1) % len(remove_options)
+                    elif key == '\r' or key == '\n':
+                        if remove_idx < len(prefixes):
+                            removed = prefixes[remove_idx]
+                            new_prefixes = prefixes[:remove_idx] + prefixes[remove_idx+1:]
+                            config["allowed_prefixes"] = new_prefixes
+                            save_config(config)
+                            message = f"{GREEN}✓ Removed '{removed}'{RESET}"
+                        break
+                    elif key == 'q' or key == '\x03' or key == 'ESC':
+                        break
+
+            elif choice == "Clear all prefixes":
+                clear_screen()
+                sys.stdout.write("\033[?25h")
+                print(f"{BOLD}{YELLOW}Clear all prefixes?{RESET}\n")
+                if interactive_confirm("Are you sure?", default=False):
+                    config["allowed_prefixes"] = []
+                    save_config(config)
+                    message = f"{GREEN}✓ All prefixes cleared{RESET}"
+
+        except Exception:
+            sys.stdout.write("\033[?25h\n")
+            raise
+
+    return config
 
 
 def interactive_setup():
@@ -437,10 +621,14 @@ def interactive_setup():
             env_key = PROVIDERS[provider]["env_key"]
             env_var_key = os.environ.get(env_key, "")
 
-            # Check for existing saved key (for same provider)
+            # Check for existing saved key for this provider (stored per-provider)
             saved_key = None
-            if existing_config and existing_config.get("provider") == provider:
-                saved_key = existing_config.get("api_key")
+            if existing_config:
+                # First check api_keys dict (new format)
+                saved_key = existing_config.get("api_keys", {}).get(provider)
+                # Fallback to old single api_key if same provider
+                if not saved_key and existing_config.get("provider") == provider:
+                    saved_key = existing_config.get("api_key")
 
             # Build options based on what's available
             key_options = []
@@ -492,10 +680,19 @@ def interactive_setup():
                     continue
                 break
 
+    # Build api_keys dict, preserving keys from other providers
+    api_keys = existing_config.get("api_keys", {}).copy() if existing_config else {}
+    if api_key:
+        api_keys[provider] = api_key
+
+    # Preserve existing permissions when reconfiguring
     config = {
         "provider": provider,
         "model": model,
-        "api_key": api_key
+        "api_key": api_key,  # Current provider's key for backward compatibility
+        "api_keys": api_keys,  # All provider keys
+        "auto_execute_all": existing_config.get("auto_execute_all", False) if existing_config else False,
+        "allowed_prefixes": existing_config.get("allowed_prefixes", []) if existing_config else []
     }
 
     save_config(config)
@@ -512,29 +709,66 @@ def interactive_setup():
 
 
 def call_openai(config, prompt):
-    """Call OpenAI API."""
+    """Call OpenAI API with structured output."""
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
         "Content-Type": "application/json"
     }
+
     data = {
         "model": config["model"],
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": "You are a command-line assistant. Convert natural language to shell commands. Return JSON with commands array and unsafe boolean."},
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 500,
-        "temperature": 0,
-        "response_format": {"type": "json_object"}
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "command_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "commands": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "cmd": {"type": "string", "description": "The shell command to execute"},
+                                    "desc": {"type": "string", "description": "Brief description of what the command does"}
+                                },
+                                "required": ["cmd", "desc"],
+                                "additionalProperties": False
+                            },
+                            "description": "List of commands to execute in order"
+                        },
+                        "unsafe": {
+                            "type": "boolean",
+                            "description": "True if the request is dangerous or unclear"
+                        }
+                    },
+                    "required": ["commands", "unsafe"],
+                    "additionalProperties": False
+                }
+            }
+        }
     }
 
     response = requests.post(
-        PROVIDERS["openai"]["api_url"],
+        "https://api.openai.com/v1/chat/completions",
         headers=headers,
         json=data,
         timeout=30
     )
-    response.raise_for_status()
+
+    if response.status_code != 200:
+        try:
+            error_detail = response.json()
+            print(f"{RED}API Error: {error_detail.get('error', {}).get('message', response.text)}{RESET}")
+        except:
+            print(f"{RED}API Error: {response.text}{RESET}")
+        response.raise_for_status()
+
     return response.json()["choices"][0]["message"]["content"].strip()
 
 
@@ -560,7 +794,15 @@ def call_anthropic(config, prompt):
         json=data,
         timeout=30
     )
-    response.raise_for_status()
+
+    if response.status_code != 200:
+        try:
+            error_detail = response.json()
+            print(f"{RED}API Error: {error_detail.get('error', {}).get('message', response.text)}{RESET}")
+        except:
+            print(f"{RED}API Error: {response.text}{RESET}")
+        response.raise_for_status()
+
     return response.json()["content"][0]["text"].strip()
 
 
@@ -699,14 +941,109 @@ def execute_command(command):
         return 1
 
 
+def get_command_prefix(cmd):
+    """Extract a meaningful prefix from a command for allowlisting."""
+    parts = cmd.strip().split()
+    if not parts:
+        return cmd
+    # If sudo, include the actual command after sudo
+    if parts[0] == "sudo" and len(parts) >= 2:
+        return f"sudo {parts[1]}"
+    # Otherwise just the first word (the command)
+    return parts[0]
+
+
+def check_command_allowed(cmd, allowed_prefixes, auto_execute_all):
+    """Check if a command is allowed based on prefixes or auto-execute flag."""
+    if auto_execute_all:
+        return True
+    for prefix in allowed_prefixes:
+        if cmd.strip().startswith(prefix):
+            return True
+    return False
+
+
+def confirm_command_execution(cmd, allowed_prefixes):
+    """
+    Ask for confirmation with arrow key navigation.
+    Returns: (execute: bool, allow_prefix: str|None, allow_all: bool)
+    """
+    prefix = get_command_prefix(cmd)
+
+    options = [
+        "Yes - execute",
+        "No - skip",
+        f"Always allow '{prefix}...'",
+        "Always allow all"
+    ]
+
+    selected = 0
+
+    sys.stdout.write("\033[?25l")  # Hide cursor
+    sys.stdout.flush()
+
+    try:
+        while True:
+            sys.stdout.write(f"\n{BOLD}Execute?{RESET} {DIM}(↑↓ or j/k to navigate, Enter to select){RESET}\n\n")
+
+            for i, opt in enumerate(options):
+                if i == selected:
+                    sys.stdout.write(f"  {GREEN}❯ {opt}{RESET}\n")
+                else:
+                    sys.stdout.write(f"    {DIM}{opt}{RESET}\n")
+
+            sys.stdout.flush()
+
+            key = get_key()
+
+            if key == 'UP' or key == 'k':
+                selected = (selected - 1) % len(options)
+            elif key == 'DOWN' or key == 'j':
+                selected = (selected + 1) % len(options)
+            elif key == '\r' or key == '\n':
+                break
+            elif key == '\x03':  # Ctrl+C
+                sys.stdout.write("\033[?25h\n")
+                sys.exit(0)
+
+            # Clear and redraw
+            lines = len(options) + 3
+            sys.stdout.write(f"\033[{lines}A")
+            for _ in range(lines):
+                sys.stdout.write(f"{CLEAR_LINE}\n")
+            sys.stdout.write(f"\033[{lines}A")
+
+        sys.stdout.write("\033[?25h\n")
+
+        if selected == 0:
+            return (True, None, False)
+        elif selected == 1:
+            return (False, None, False)
+        elif selected == 2:
+            return (True, prefix, False)
+        else:
+            return (True, None, True)
+
+    except Exception:
+        sys.stdout.write("\033[?25h\n")
+        raise
+
+
 def interactive_mode(config):
     """Run in interactive mode."""
     print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
     print(f"{BOLD}{CYAN}  ⚡ Termi Interactive Mode{RESET}")
     print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
-    print(f"{DIM}Type natural language commands, 'exit' to quit, 'config' to reconfigure{RESET}\n")
+    print(f"{DIM}Type natural language commands, 'exit' to quit, 'permissions' to manage auto-execute{RESET}\n")
 
-    auto_execute = False  # "Always allow" flag
+    # Load permissions from config
+    auto_execute_all = config.get("auto_execute_all", False)
+    allowed_prefixes = set(config.get("allowed_prefixes", []))
+
+    if auto_execute_all:
+        print(f"{GREEN}✓ Auto-execute ALL commands is enabled{RESET}\n")
+    elif allowed_prefixes:
+        print(f"{GREEN}✓ Auto-execute enabled for {len(allowed_prefixes)} prefix(es){RESET}\n")
 
     while True:
         try:
@@ -721,12 +1058,34 @@ def interactive_mode(config):
 
             if user_input.lower() == "config":
                 config = interactive_setup()
-                auto_execute = False  # Reset auto-execute on reconfigure
+                # Reload permissions from new config
+                auto_execute_all = config.get("auto_execute_all", False)
+                allowed_prefixes = set(config.get("allowed_prefixes", []))
                 continue
 
-            if user_input.lower() == "confirm":
-                auto_execute = False
-                print(f"{GREEN}✓ Confirmation re-enabled{RESET}")
+            if user_input.lower() in ("permissions", "perms", "perm"):
+                config = manage_permissions(config)
+                # Reload permissions from updated config
+                auto_execute_all = config.get("auto_execute_all", False)
+                allowed_prefixes = set(config.get("allowed_prefixes", []))
+                continue
+
+            if user_input.lower() == "reset":
+                auto_execute_all = False
+                allowed_prefixes.clear()
+                update_permissions(config, auto_execute_all=False, allowed_prefixes=[])
+                print(f"{GREEN}✓ All auto-execute settings reset and saved{RESET}")
+                continue
+
+            if user_input.lower() == "allowed":
+                if auto_execute_all:
+                    print(f"{CYAN}Auto-execute: {BOLD}ALL commands{RESET}")
+                elif allowed_prefixes:
+                    print(f"{CYAN}Allowed prefixes:{RESET}")
+                    for p in sorted(allowed_prefixes):
+                        print(f"  {GREEN}✓{RESET} {p}...")
+                else:
+                    print(f"{DIM}No auto-execute rules set{RESET}")
                 continue
 
             # Translate to commands
@@ -743,35 +1102,52 @@ def interactive_mode(config):
             print(f"\n{YELLOW}Commands to execute:{RESET}")
             for i, cmd in enumerate(commands, 1):
                 desc = f" {DIM}# {cmd['desc']}{RESET}" if cmd.get('desc') else ""
-                print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}")
+                allowed = check_command_allowed(cmd['cmd'], allowed_prefixes, auto_execute_all)
+                status = f" {GREEN}✓{RESET}" if allowed else ""
+                print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}{status}")
             print()
 
-            # Execute commands
-            if auto_execute:
-                print(f"{DIM}(Auto-executing){RESET}")
-                confirm = True
-            else:
-                confirm = interactive_confirm("Execute?", default=True, allow_always=True)
-                if confirm == 'always':
-                    auto_execute = True
-                    print(f"{GREEN}✓ Auto-execute enabled (type 'confirm' to re-enable confirmations){RESET}")
-                    confirm = True
+            # Execute commands one by one
+            for i, cmd in enumerate(commands, 1):
+                cmd_str = cmd['cmd']
 
-            if confirm:
-                for i, cmd in enumerate(commands, 1):
+                # Check if command is auto-allowed
+                if check_command_allowed(cmd_str, allowed_prefixes, auto_execute_all):
+                    print(f"{DIM}(Auto-allowed){RESET}")
+                    should_execute = True
+                else:
+                    execute, prefix, allow_all = confirm_command_execution(cmd_str, allowed_prefixes)
+
+                    if allow_all:
+                        auto_execute_all = True
+                        update_permissions(config, auto_execute_all=True)
+                        print(f"{GREEN}✓ Auto-execute ALL enabled and saved (type 'reset' to disable){RESET}")
+
+                    if prefix:
+                        allowed_prefixes.add(prefix)
+                        update_permissions(config, allowed_prefixes=list(allowed_prefixes))
+                        print(f"{GREEN}✓ Always allowing '{prefix}...' - saved (type 'reset' to clear){RESET}")
+
+                    should_execute = execute
+
+                if should_execute:
                     print(f"{CYAN}{'─' * 40}{RESET}")
-                    print(f"{DIM}[{i}/{len(commands)}] {cmd['cmd']}{RESET}")
-                    exit_code = execute_command(cmd['cmd'])
+                    print(f"{DIM}[{i}/{len(commands)}] {cmd_str}{RESET}")
+                    exit_code = execute_command(cmd_str)
                     if exit_code != 0:
                         print(f"{YELLOW}⚠ Command exited with code {exit_code}{RESET}")
                         if len(commands) > i:
-                            if not auto_execute:
+                            if not auto_execute_all:
                                 if not interactive_confirm("Continue with remaining commands?", default=False):
                                     print(f"{DIM}Remaining commands skipped.{RESET}")
                                     break
-                print(f"{CYAN}{'─' * 40}{RESET}")
-            else:
-                print(f"{DIM}Skipped.{RESET}")
+                    print(f"{CYAN}{'─' * 40}{RESET}")
+                else:
+                    print(f"{DIM}Skipped.{RESET}")
+                    if len(commands) > i:
+                        if not interactive_confirm("Continue with remaining commands?", default=True):
+                            print(f"{DIM}Remaining commands skipped.{RESET}")
+                            break
 
         except KeyboardInterrupt:
             print(f"\n{DIM}Goodbye!{RESET}")
@@ -790,6 +1166,15 @@ def main():
         interactive_setup()
         return
 
+    # Handle --permissions flag
+    if "--permissions" in args or "-p" in args:
+        config = load_config()
+        if config is None:
+            print(f"{YELLOW}No configuration found. Running setup first.{RESET}")
+            config = interactive_setup()
+        manage_permissions(config)
+        return
+
     # Handle --help flag
     if "--help" in args or "-h" in args:
         print(f"""
@@ -799,7 +1184,15 @@ def main():
   termi                     Start interactive mode (setup on first run)
   termi <natural language>  Execute a natural language command
   termi --config            Reconfigure settings
+  termi --permissions       Manage auto-execute permissions
   termi --help              Show this help message
+
+{CYAN}Interactive commands:{RESET}
+  permissions               Open permissions management menu
+  reset                     Clear all auto-execute permissions
+  allowed                   Show current auto-execute rules
+  config                    Reconfigure LLM settings
+  exit                      Exit interactive mode
 
 {CYAN}Examples:{RESET}
   termi list all files
@@ -833,36 +1226,68 @@ def main():
 
     commands = result["commands"]
 
-    # Display commands
+    # Load permissions from config
+    auto_execute_all = config.get("auto_execute_all", False)
+    allowed_prefixes = set(config.get("allowed_prefixes", []))
+
+    # Display commands with auto-allowed status
     print(f"\n{YELLOW}Commands to execute:{RESET}")
     for i, cmd in enumerate(commands, 1):
         desc = f" {DIM}# {cmd['desc']}{RESET}" if cmd.get('desc') else ""
-        print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}")
+        allowed = check_command_allowed(cmd['cmd'], allowed_prefixes, auto_execute_all)
+        status = f" {GREEN}✓{RESET}" if allowed else ""
+        print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}{status}")
     print()
 
-    # Ask for confirmation unless --yes flag
+    # Override with --yes flag if provided
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
-
-    if not auto_yes:
-        confirm = interactive_confirm("Execute?", default=True)
-        if not confirm:
-            print(f"{DIM}Skipped.{RESET}")
-            return
+    if auto_yes:
+        auto_execute_all = True
 
     # Execute commands sequentially
     final_exit_code = 0
     for i, cmd in enumerate(commands, 1):
+        cmd_str = cmd['cmd']
+
+        if auto_execute_all:
+            should_execute = True
+        elif check_command_allowed(cmd_str, allowed_prefixes, False):
+            print(f"{DIM}(Auto-allowed){RESET}")
+            should_execute = True
+        else:
+            execute, prefix, allow_all = confirm_command_execution(cmd_str, allowed_prefixes)
+
+            if allow_all:
+                auto_execute_all = True
+                update_permissions(config, auto_execute_all=True)
+                print(f"{GREEN}✓ Auto-execute ALL enabled and saved{RESET}")
+
+            if prefix:
+                allowed_prefixes.add(prefix)
+                update_permissions(config, allowed_prefixes=list(allowed_prefixes))
+                print(f"{GREEN}✓ Always allowing '{prefix}...' - saved{RESET}")
+
+            should_execute = execute
+
+        if not should_execute:
+            print(f"{DIM}Skipped.{RESET}")
+            if len(commands) > i:
+                if not interactive_confirm("Continue with remaining commands?", default=True):
+                    print(f"{DIM}Remaining commands skipped.{RESET}")
+                    break
+            continue
+
         print(f"{CYAN}{'─' * 40}{RESET}")
-        print(f"{DIM}[{i}/{len(commands)}] {cmd['cmd']}{RESET}")
-        exit_code = execute_command(cmd['cmd'])
+        print(f"{DIM}[{i}/{len(commands)}] {cmd_str}{RESET}")
+        exit_code = execute_command(cmd_str)
         if exit_code != 0:
             print(f"{YELLOW}⚠ Command exited with code {exit_code}{RESET}")
             final_exit_code = exit_code
-            if len(commands) > i and not auto_yes:
+            if len(commands) > i and not auto_execute_all:
                 if not interactive_confirm("Continue with remaining commands?", default=False):
                     print(f"{DIM}Remaining commands skipped.{RESET}")
                     break
-    print(f"{CYAN}{'─' * 40}{RESET}")
+        print(f"{CYAN}{'─' * 40}{RESET}")
 
     sys.exit(final_exit_code)
 
