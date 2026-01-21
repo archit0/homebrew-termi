@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""
+Termi - A natural language terminal command executor.
+Translates natural language to shell commands using LLM APIs.
+"""
+
+import os
+import sys
+import json
+import re
+import subprocess
+import tty
+import termios
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' library is required. Install it with: pip install requests")
+    sys.exit(1)
+
+CONFIG_DIR = Path.home() / ".termi"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+PROVIDERS = {
+    "openai": {
+        "suggested_models": ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4o-mini"],
+        "api_url": "https://api.openai.com/v1/chat/completions",
+        "env_key": "OPENAI_API_KEY",
+        "requires_key": True
+    },
+    "anthropic": {
+        "suggested_models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-haiku-20241022"],
+        "api_url": "https://api.anthropic.com/v1/messages",
+        "env_key": "ANTHROPIC_API_KEY",
+        "requires_key": True
+    },
+    "ollama": {
+        "suggested_models": [],  # Dynamically fetched
+        "api_url": "http://localhost:11434/api/chat",
+        "tags_url": "http://localhost:11434/api/tags",
+        "env_key": None,
+        "requires_key": False
+    }
+}
+
+SYSTEM_PROMPT = """You are a command-line assistant. Convert natural language requests into shell commands.
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{
+  "commands": [
+    {"cmd": "command here", "desc": "brief description"}
+  ],
+  "unsafe": false
+}
+
+Rules:
+1. Return a JSON object with "commands" array and "unsafe" boolean
+2. Each command has "cmd" (the shell command) and "desc" (brief description)
+3. For multi-step tasks, return multiple commands in order (they run sequentially)
+4. Use common Unix/Linux commands that work on most systems
+5. Be conservative - prefer safe, non-destructive commands
+6. Set "unsafe": true if the request is dangerous, unclear, or could cause harm
+
+Examples:
+
+User: "list all files"
+{"commands": [{"cmd": "ls -la", "desc": "List all files including hidden"}], "unsafe": false}
+
+User: "go to /tmp and create a folder called test"
+{"commands": [{"cmd": "cd /tmp", "desc": "Change to /tmp directory"}, {"cmd": "mkdir test", "desc": "Create test folder"}], "unsafe": false}
+
+User: "find python files and count them"
+{"commands": [{"cmd": "find . -name '*.py' | wc -l", "desc": "Count Python files"}], "unsafe": false}
+
+User: "delete everything"
+{"commands": [], "unsafe": true}
+
+User: "rm -rf /"
+{"commands": [], "unsafe": true}"""
+
+# Terminal colors
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+CLEAR_LINE = "\033[2K"
+
+
+def get_ollama_models():
+    """Fetch available models from Ollama."""
+    try:
+        response = requests.get(
+            PROVIDERS["ollama"]["tags_url"],
+            timeout=5
+        )
+        response.raise_for_status()
+        data = response.json()
+        models = [model["name"] for model in data.get("models", [])]
+        return models
+    except requests.exceptions.ConnectionError:
+        return None  # Ollama not running
+    except Exception:
+        return []
+
+
+def check_ollama_running():
+    """Check if Ollama is running."""
+    try:
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=3
+        )
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def get_key():
+    """Read a single keypress from stdin."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        # Handle escape sequences (arrow keys)
+        if ch == '\x1b':
+            ch2 = sys.stdin.read(1)
+            if ch2 == '[':
+                ch3 = sys.stdin.read(1)
+                if ch3 == 'A':
+                    return 'UP'
+                elif ch3 == 'B':
+                    return 'DOWN'
+                elif ch3 == 'C':
+                    return 'RIGHT'
+                elif ch3 == 'D':
+                    return 'LEFT'
+            return 'ESC'
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def interactive_select(title, options, allow_custom=False, allow_back=False):
+    """
+    Display an interactive selection menu with arrow key navigation.
+    Returns the selected option, custom input, or None if back is selected.
+    """
+    display_options = list(options)
+    if allow_custom:
+        display_options.append("[ Enter custom value ]")
+    if allow_back:
+        display_options.insert(0, f"{DIM}← Back{RESET}")
+
+    selected = 1 if allow_back else 0  # Start on first real option if back exists
+
+    # Hide cursor
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+
+    try:
+        while True:
+            # Print title
+            sys.stdout.write(f"\n{BOLD}{CYAN}{title}{RESET}\n")
+            hint = "Use ↑↓ to navigate, Enter to select"
+            if allow_back:
+                hint += ", Esc to go back"
+            sys.stdout.write(f"{DIM}{hint}{RESET}\n\n")
+
+            # Print options
+            for i, option in enumerate(display_options):
+                if i == selected:
+                    sys.stdout.write(f"  {GREEN}❯ {option}{RESET}\n")
+                else:
+                    sys.stdout.write(f"    {DIM}{option}{RESET}\n")
+
+            sys.stdout.flush()
+
+            # Get keypress
+            key = get_key()
+
+            if key == 'UP' or key == 'k':
+                selected = (selected - 1) % len(display_options)
+            elif key == 'DOWN' or key == 'j':
+                selected = (selected + 1) % len(display_options)
+            elif key == '\r' or key == '\n':  # Enter
+                break
+            elif key == 'ESC' and allow_back:  # Escape to go back
+                selected = 0  # Select back option
+                break
+            elif key == 'q' or key == '\x03':  # q or Ctrl+C
+                sys.stdout.write("\033[?25h")  # Show cursor
+                sys.stdout.write("\n")
+                sys.exit(0)
+
+            # Move cursor up to redraw
+            lines_to_clear = len(display_options) + 4
+            sys.stdout.write(f"\033[{lines_to_clear}A")
+            for _ in range(lines_to_clear):
+                sys.stdout.write(f"{CLEAR_LINE}\n")
+            sys.stdout.write(f"\033[{lines_to_clear}A")
+
+        # Show cursor
+        sys.stdout.write("\033[?25h")
+        sys.stdout.write("\n")
+
+        # Handle back option
+        if allow_back and selected == 0:
+            return None  # Signal to go back
+
+        # Adjust index if back option exists
+        actual_idx = selected - 1 if allow_back else selected
+
+        # Handle custom input
+        custom_idx = len(options)  # Index of custom option in original list
+        if allow_custom and actual_idx == custom_idx:
+            custom_val = input(f"{CYAN}Enter custom value: {RESET}").strip()
+            if not custom_val:
+                return None  # Treat empty as back
+            return custom_val
+
+        return options[actual_idx]
+
+    except Exception:
+        # Ensure cursor is shown on error
+        sys.stdout.write("\033[?25h\n")
+        raise
+
+
+def interactive_confirm(prompt, default=True, allow_always=False):
+    """
+    Display an interactive confirmation.
+    Returns: True (yes), False (no), or 'always' if allow_always is True.
+    """
+    if allow_always:
+        options = ["Yes", "No", "Always"]
+    else:
+        options = ["Yes", "No"] if default else ["No", "Yes"]
+
+    selected = 0
+
+    sys.stdout.write("\033[?25l")  # Hide cursor
+    sys.stdout.flush()
+
+    try:
+        while True:
+            # Build the line
+            line = f"{BOLD}{prompt}{RESET}  "
+            for i, opt in enumerate(options):
+                if i == selected:
+                    line += f" {GREEN}[{opt}]{RESET} "
+                else:
+                    line += f" {DIM}{opt}{RESET} "
+
+            # Clear current line and write
+            sys.stdout.write(f"\r{CLEAR_LINE}{line}")
+            sys.stdout.flush()
+
+            key = get_key()
+
+            if key == 'LEFT' or key == 'h':
+                selected = (selected - 1) % len(options)
+            elif key == 'RIGHT' or key == 'l':
+                selected = (selected + 1) % len(options)
+            elif key == '\r' or key == '\n':
+                break
+            elif key == 'y' or key == 'Y':
+                selected = 0  # Yes
+                break
+            elif key == 'n' or key == 'N':
+                selected = 1  # No
+                break
+            elif allow_always and (key == 'a' or key == 'A'):
+                selected = 2  # Always
+                break
+            elif key == '\x03':  # Ctrl+C
+                sys.stdout.write("\033[?25h\n")
+                sys.exit(0)
+
+        sys.stdout.write("\033[?25h\n")
+
+        if allow_always:
+            if selected == 0:
+                return True
+            elif selected == 1:
+                return False
+            else:
+                return 'always'
+        else:
+            return (selected == 0) if default else (selected == 1)
+
+    except Exception:
+        sys.stdout.write("\033[?25h\n")
+        raise
+
+
+def get_password_input(prompt):
+    """Get password input with asterisk masking."""
+    sys.stdout.write(f"{prompt}")
+    sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    password = []
+
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == '\r' or ch == '\n':
+                break
+            elif ch == '\x7f' or ch == '\x08':  # Backspace
+                if password:
+                    password.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+            elif ch == '\x03':  # Ctrl+C
+                sys.stdout.write('\n')
+                sys.exit(0)
+            elif ch >= ' ':  # Printable characters
+                password.append(ch)
+                sys.stdout.write('*')
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    sys.stdout.write('\n')
+    return ''.join(password)
+
+
+def load_config():
+    """Load configuration from file."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
+    return None
+
+
+def save_config(config):
+    """Save configuration to file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+    os.chmod(CONFIG_FILE, 0o600)  # Secure the file
+
+
+def interactive_setup():
+    """Run interactive configuration setup."""
+    print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
+    print(f"{BOLD}{CYAN}  ⚡ Welcome to Termi - Natural Language Terminal{RESET}")
+    print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
+
+    # Load existing config to check for saved API key
+    existing_config = load_config()
+
+    # Check Ollama availability and build provider list
+    ollama_available = check_ollama_running()
+    providers = list(PROVIDERS.keys())
+
+    # State machine for navigation
+    step = "provider"
+    provider = None
+    model = None
+    api_key = None
+
+    while True:
+        if step == "provider":
+            # Build provider display list
+            provider_display = []
+            for p in providers:
+                label = p.upper()
+                if p == "ollama":
+                    if ollama_available:
+                        label += f" {GREEN}(local){RESET}"
+                    else:
+                        label += f" {DIM}(not running){RESET}"
+                provider_display.append(label)
+
+            selected = interactive_select("Select your LLM provider:", provider_display)
+            if selected is None:
+                continue  # No back from first step, just re-show
+            provider_idx = provider_display.index(selected)
+            provider = providers[provider_idx]
+
+            # Handle Ollama selection when not running
+            if provider == "ollama" and not ollama_available:
+                print(f"\n{YELLOW}⚠ Ollama is not running.{RESET}")
+                print(f"{DIM}Start Ollama with: ollama serve{RESET}")
+                if not interactive_confirm("Continue anyway?", default=False):
+                    continue  # Go back to provider selection
+
+            step = "model"
+
+        elif step == "model":
+            # Get model list
+            if provider == "ollama":
+                print(f"\n{DIM}Fetching available Ollama models...{RESET}")
+                ollama_models = get_ollama_models()
+                if ollama_models is None:
+                    print(f"{YELLOW}⚠ Could not connect to Ollama{RESET}")
+                    suggested_models = ["llama3.2", "llama3.1", "mistral", "codellama", "phi3"]
+                elif len(ollama_models) == 0:
+                    print(f"{YELLOW}⚠ No models installed. Install with: ollama pull <model>{RESET}")
+                    suggested_models = ["llama3.2", "llama3.1", "mistral", "codellama", "phi3"]
+                else:
+                    print(f"{GREEN}✓ Found {len(ollama_models)} installed model(s){RESET}")
+                    suggested_models = ollama_models
+            else:
+                suggested_models = PROVIDERS[provider]["suggested_models"]
+
+            model = interactive_select(
+                f"Select your {provider.upper()} model:",
+                suggested_models,
+                allow_custom=True,
+                allow_back=True
+            )
+
+            if model is None:
+                step = "provider"  # Go back
+                continue
+
+            step = "api_key"
+
+        elif step == "api_key":
+            # Get API key (only for providers that require it)
+            if not PROVIDERS[provider]["requires_key"]:
+                api_key = None
+                break  # Done, no API key needed
+
+            env_key = PROVIDERS[provider]["env_key"]
+            env_var_key = os.environ.get(env_key, "")
+
+            # Check for existing saved key (for same provider)
+            saved_key = None
+            if existing_config and existing_config.get("provider") == provider:
+                saved_key = existing_config.get("api_key")
+
+            # Build options based on what's available
+            key_options = []
+            key_values = {}
+
+            if saved_key:
+                masked = saved_key[:8] + "..." + saved_key[-4:] if len(saved_key) > 12 else "***"
+                key_options.append(f"Keep existing key ({masked})")
+                key_values["keep"] = saved_key
+
+            if env_var_key:
+                masked = env_var_key[:8] + "..." + env_var_key[-4:] if len(env_var_key) > 12 else "***"
+                key_options.append(f"Use {env_key} from environment ({masked})")
+                key_values["env"] = env_var_key
+
+            key_options.append("Enter new API key")
+
+            if key_options and (saved_key or env_var_key):
+                # Has existing key - offer choices
+                selected = interactive_select(
+                    f"API Key for {provider.upper()}:",
+                    key_options,
+                    allow_back=True
+                )
+
+                if selected is None:
+                    step = "model"  # Go back
+                    continue
+
+                if "Keep existing" in selected:
+                    api_key = key_values["keep"]
+                    print(f"{GREEN}✓ Keeping existing API key{RESET}")
+                    break
+                elif "environment" in selected:
+                    api_key = key_values["env"]
+                    print(f"{GREEN}✓ Using API key from environment variable{RESET}")
+                    break
+                else:
+                    # Enter new key
+                    api_key = get_password_input(f"{CYAN}Enter new API key (empty to go back): {RESET}")
+                    if not api_key:
+                        continue  # Re-show options
+                    break
+            else:
+                # No existing key - must enter one
+                api_key = get_password_input(f"{CYAN}Enter your {provider.upper()} API key (empty to go back): {RESET}")
+                if not api_key:
+                    step = "model"  # Go back
+                    continue
+                break
+
+    config = {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key
+    }
+
+    save_config(config)
+
+    print(f"\n{GREEN}{'─' * 50}{RESET}")
+    print(f"{GREEN}✓ Configuration saved to {CONFIG_FILE}{RESET}")
+    print(f"{GREEN}{'─' * 50}{RESET}")
+    print(f"\n{BOLD}Setup complete!{RESET} You can now use termi:")
+    print(f"  {DIM}$ termi list all files{RESET}")
+    print(f"  {DIM}$ termi show disk usage{RESET}")
+    print(f"\n{DIM}To reconfigure: termi --config{RESET}\n")
+
+    return config
+
+
+def call_openai(config, prompt):
+    """Call OpenAI API."""
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": config["model"],
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 500,
+        "temperature": 0,
+        "response_format": {"type": "json_object"}
+    }
+
+    response = requests.post(
+        PROVIDERS["openai"]["api_url"],
+        headers=headers,
+        json=data,
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def call_anthropic(config, prompt):
+    """Call Anthropic API."""
+    headers = {
+        "x-api-key": config["api_key"],
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01"
+    }
+    data = {
+        "model": config["model"],
+        "max_tokens": 500,
+        "system": SYSTEM_PROMPT,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    response = requests.post(
+        PROVIDERS["anthropic"]["api_url"],
+        headers=headers,
+        json=data,
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()["content"][0]["text"].strip()
+
+
+def clean_llm_response(text):
+    """Clean up LLM response by removing thinking tags and extracting JSON."""
+    # Remove <think>...</think> blocks (including multiline)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove <thinking>...</thinking> blocks
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove <reasoning>...</reasoning> blocks
+    text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove markdown code blocks wrapper
+    text = re.sub(r'^```(?:json)?\n?', '', text.strip())
+    text = re.sub(r'\n?```$', '', text.strip())
+
+    return text.strip()
+
+
+def parse_llm_response(text):
+    """Parse LLM response and extract structured command data."""
+    text = clean_llm_response(text)
+
+    try:
+        # Try to parse as JSON
+        data = json.loads(text)
+
+        if isinstance(data, dict):
+            commands = data.get("commands", [])
+            unsafe = data.get("unsafe", False)
+
+            if unsafe or not commands:
+                return {"commands": [], "unsafe": True}
+
+            # Normalize commands format
+            normalized = []
+            for cmd in commands:
+                if isinstance(cmd, dict):
+                    normalized.append({
+                        "cmd": cmd.get("cmd", ""),
+                        "desc": cmd.get("desc", "")
+                    })
+                elif isinstance(cmd, str):
+                    normalized.append({"cmd": cmd, "desc": ""})
+
+            return {"commands": normalized, "unsafe": False}
+
+    except json.JSONDecodeError:
+        # Fallback: try to extract command from plain text
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if lines:
+            # Check for unsafe markers
+            first_line = lines[0].lower()
+            if "unsafe" in first_line or "cannot" in first_line or "sorry" in first_line:
+                return {"commands": [], "unsafe": True}
+
+            return {
+                "commands": [{"cmd": lines[0], "desc": ""}],
+                "unsafe": False
+            }
+
+    return {"commands": [], "unsafe": True}
+
+
+def call_ollama(config, prompt):
+    """Call Ollama API."""
+    data = {
+        "model": config["model"],
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": 0,
+            "num_predict": 500
+        }
+    }
+
+    response = requests.post(
+        PROVIDERS["ollama"]["api_url"],
+        json=data,
+        timeout=120  # Local models may be slower
+    )
+    response.raise_for_status()
+    raw_response = response.json()["message"]["content"].strip()
+    return clean_llm_response(raw_response)
+
+
+def translate_to_commands(config, natural_language):
+    """Translate natural language to shell commands. Returns structured data."""
+    try:
+        if config["provider"] == "openai":
+            raw_response = call_openai(config, natural_language)
+        elif config["provider"] == "anthropic":
+            raw_response = call_anthropic(config, natural_language)
+        elif config["provider"] == "ollama":
+            raw_response = call_ollama(config, natural_language)
+        else:
+            print(f"{RED}Error: Unknown provider {config['provider']}{RESET}")
+            sys.exit(1)
+
+        return parse_llm_response(raw_response)
+
+    except requests.exceptions.ConnectionError:
+        if config["provider"] == "ollama":
+            print(f"{RED}Error: Cannot connect to Ollama. Is it running?{RESET}")
+            print(f"{DIM}Start with: ollama serve{RESET}")
+        else:
+            print(f"{RED}Error: Connection failed{RESET}")
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"{RED}Error calling API: {e}{RESET}")
+        sys.exit(1)
+
+
+def execute_command(command):
+    """Execute a shell command and print output."""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        return result.returncode
+    except Exception as e:
+        print(f"{RED}Error executing command: {e}{RESET}")
+        return 1
+
+
+def interactive_mode(config):
+    """Run in interactive mode."""
+    print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
+    print(f"{BOLD}{CYAN}  ⚡ Termi Interactive Mode{RESET}")
+    print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
+    print(f"{DIM}Type natural language commands, 'exit' to quit, 'config' to reconfigure{RESET}\n")
+
+    auto_execute = False  # "Always allow" flag
+
+    while True:
+        try:
+            user_input = input(f"{BOLD}{GREEN}termi❯{RESET} ").strip()
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ("exit", "quit", "q"):
+                print(f"{DIM}Goodbye!{RESET}")
+                break
+
+            if user_input.lower() == "config":
+                config = interactive_setup()
+                auto_execute = False  # Reset auto-execute on reconfigure
+                continue
+
+            if user_input.lower() == "confirm":
+                auto_execute = False
+                print(f"{GREEN}✓ Confirmation re-enabled{RESET}")
+                continue
+
+            # Translate to commands
+            print(f"{DIM}Translating...{RESET}")
+            result = translate_to_commands(config, user_input)
+
+            if result["unsafe"] or not result["commands"]:
+                print(f"{RED}✗ Request declined: potentially unsafe or unclear command.{RESET}")
+                continue
+
+            commands = result["commands"]
+
+            # Display commands
+            print(f"\n{YELLOW}Commands to execute:{RESET}")
+            for i, cmd in enumerate(commands, 1):
+                desc = f" {DIM}# {cmd['desc']}{RESET}" if cmd.get('desc') else ""
+                print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}")
+            print()
+
+            # Execute commands
+            if auto_execute:
+                print(f"{DIM}(Auto-executing){RESET}")
+                confirm = True
+            else:
+                confirm = interactive_confirm("Execute?", default=True, allow_always=True)
+                if confirm == 'always':
+                    auto_execute = True
+                    print(f"{GREEN}✓ Auto-execute enabled (type 'confirm' to re-enable confirmations){RESET}")
+                    confirm = True
+
+            if confirm:
+                for i, cmd in enumerate(commands, 1):
+                    print(f"{CYAN}{'─' * 40}{RESET}")
+                    print(f"{DIM}[{i}/{len(commands)}] {cmd['cmd']}{RESET}")
+                    exit_code = execute_command(cmd['cmd'])
+                    if exit_code != 0:
+                        print(f"{YELLOW}⚠ Command exited with code {exit_code}{RESET}")
+                        if len(commands) > i:
+                            if not auto_execute:
+                                if not interactive_confirm("Continue with remaining commands?", default=False):
+                                    print(f"{DIM}Remaining commands skipped.{RESET}")
+                                    break
+                print(f"{CYAN}{'─' * 40}{RESET}")
+            else:
+                print(f"{DIM}Skipped.{RESET}")
+
+        except KeyboardInterrupt:
+            print(f"\n{DIM}Goodbye!{RESET}")
+            break
+        except EOFError:
+            print(f"\n{DIM}Goodbye!{RESET}")
+            break
+
+
+def main():
+    """Main entry point."""
+    args = sys.argv[1:]
+
+    # Handle --config flag
+    if "--config" in args or "-c" in args:
+        interactive_setup()
+        return
+
+    # Handle --help flag
+    if "--help" in args or "-h" in args:
+        print(f"""
+{BOLD}Termi - Natural Language Terminal{RESET}
+
+{CYAN}Usage:{RESET}
+  termi                     Start interactive mode (setup on first run)
+  termi <natural language>  Execute a natural language command
+  termi --config            Reconfigure settings
+  termi --help              Show this help message
+
+{CYAN}Examples:{RESET}
+  termi list all files
+  termi show me disk usage
+  termi find all python files in src folder
+  termi count lines in all javascript files
+        """)
+        return
+
+    # Load or create config
+    config = load_config()
+
+    if config is None:
+        config = interactive_setup()
+
+    # If no arguments, run interactive mode
+    if not args:
+        interactive_mode(config)
+        return
+
+    # Process natural language command from arguments
+    # Filter out flags
+    cmd_args = [a for a in args if not a.startswith('-')]
+    natural_language = " ".join(cmd_args)
+
+    result = translate_to_commands(config, natural_language)
+
+    if result["unsafe"] or not result["commands"]:
+        print(f"{RED}✗ Request declined: potentially unsafe or unclear command.{RESET}")
+        sys.exit(1)
+
+    commands = result["commands"]
+
+    # Display commands
+    print(f"\n{YELLOW}Commands to execute:{RESET}")
+    for i, cmd in enumerate(commands, 1):
+        desc = f" {DIM}# {cmd['desc']}{RESET}" if cmd.get('desc') else ""
+        print(f"  {CYAN}{i}.{RESET} {BOLD}{cmd['cmd']}{RESET}{desc}")
+    print()
+
+    # Ask for confirmation unless --yes flag
+    auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+
+    if not auto_yes:
+        confirm = interactive_confirm("Execute?", default=True)
+        if not confirm:
+            print(f"{DIM}Skipped.{RESET}")
+            return
+
+    # Execute commands sequentially
+    final_exit_code = 0
+    for i, cmd in enumerate(commands, 1):
+        print(f"{CYAN}{'─' * 40}{RESET}")
+        print(f"{DIM}[{i}/{len(commands)}] {cmd['cmd']}{RESET}")
+        exit_code = execute_command(cmd['cmd'])
+        if exit_code != 0:
+            print(f"{YELLOW}⚠ Command exited with code {exit_code}{RESET}")
+            final_exit_code = exit_code
+            if len(commands) > i and not auto_yes:
+                if not interactive_confirm("Continue with remaining commands?", default=False):
+                    print(f"{DIM}Remaining commands skipped.{RESET}")
+                    break
+    print(f"{CYAN}{'─' * 40}{RESET}")
+
+    sys.exit(final_exit_code)
+
+
+if __name__ == "__main__":
+    main()
