@@ -16,7 +16,7 @@ A natural language terminal command executor. Translate plain English into shell
 ### Homebrew (macOS)
 
 ```bash
-brew tap archit0/termi
+brew tap archit0/homebrew-termi
 brew install termi
 ```
 
@@ -24,8 +24,8 @@ brew install termi
 
 ```bash
 # Clone the repository
-git clone https://github.com/archit0/termi.git
-cd termi
+git clone https://github.com/archit0/homebrew-termi.git
+cd homebrew-termi
 
 # Install dependencies
 pip install requests
