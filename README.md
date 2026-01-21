@@ -13,6 +13,15 @@ A natural language terminal command executor. Translate plain English into shell
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew tap archit0/termi
+brew install termi
+```
+
+### Manual
+
 ```bash
 # Clone the repository
 git clone https://github.com/archit0/termi.git
