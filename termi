@@ -781,10 +781,11 @@ def call_anthropic(config, prompt):
     }
     data = {
         "model": config["model"],
-        "max_tokens": 500,
+        "max_tokens": 1024,
         "system": SYSTEM_PROMPT,
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "{"}  # Prefill to ensure JSON output
         ]
     }
 
@@ -803,7 +804,8 @@ def call_anthropic(config, prompt):
             print(f"{RED}API Error: {response.text}{RESET}")
         response.raise_for_status()
 
-    return response.json()["content"][0]["text"].strip()
+    # Prepend the prefilled "{" to complete the JSON
+    return "{" + response.json()["content"][0]["text"].strip()
 
 
 def clean_llm_response(text):
