@@ -35,10 +35,20 @@ class Termi < Formula
   end
 
   def install
-    virtualenv_install_with_resources
+    venv = virtualenv_create(libexec, "python3.12")
+    venv.pip_install resources
+
+    # Install the termi script with correct shebang
+    (libexec/"bin").install "termi"
+
+    # Create wrapper script that uses the virtualenv
+    (bin/"termi").write <<~EOS
+      #!/bin/bash
+      exec "#{libexec}/bin/python" "#{libexec}/bin/termi" "$@"
+    EOS
   end
 
   test do
-    assert_match "Termi", shell_output("#{bin}/termi --help", 1)
+    assert_match "Termi", shell_output("#{bin}/termi --help 2>&1", 1)
   end
 end
