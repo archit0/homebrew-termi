@@ -630,55 +630,26 @@ def interactive_setup():
                 if not saved_key and existing_config.get("provider") == provider:
                     saved_key = existing_config.get("api_key")
 
-            # Build options based on what's available
-            key_options = []
-            key_values = {}
-
+            # If we have a saved key, automatically use it
             if saved_key:
+                api_key = saved_key
                 masked = saved_key[:8] + "..." + saved_key[-4:] if len(saved_key) > 12 else "***"
-                key_options.append(f"Keep existing key ({masked})")
-                key_values["keep"] = saved_key
-
-            if env_var_key:
-                masked = env_var_key[:8] + "..." + env_var_key[-4:] if len(env_var_key) > 12 else "***"
-                key_options.append(f"Use {env_key} from environment ({masked})")
-                key_values["env"] = env_var_key
-
-            key_options.append("Enter new API key")
-
-            if key_options and (saved_key or env_var_key):
-                # Has existing key - offer choices
-                selected = interactive_select(
-                    f"API Key for {provider.upper()}:",
-                    key_options,
-                    allow_back=True
-                )
-
-                if selected is None:
-                    step = "model"  # Go back
-                    continue
-
-                if "Keep existing" in selected:
-                    api_key = key_values["keep"]
-                    print(f"{GREEN}✓ Keeping existing API key{RESET}")
-                    break
-                elif "environment" in selected:
-                    api_key = key_values["env"]
-                    print(f"{GREEN}✓ Using API key from environment variable{RESET}")
-                    break
-                else:
-                    # Enter new key
-                    api_key = get_password_input(f"{CYAN}Enter new API key (empty to go back): {RESET}")
-                    if not api_key:
-                        continue  # Re-show options
-                    break
-            else:
-                # No existing key - must enter one
-                api_key = get_password_input(f"{CYAN}Enter your {provider.upper()} API key (empty to go back): {RESET}")
-                if not api_key:
-                    step = "model"  # Go back
-                    continue
+                print(f"{GREEN}✓ Using saved API key ({masked}){RESET}")
                 break
+
+            # If we have an environment key, use it
+            if env_var_key:
+                api_key = env_var_key
+                masked = env_var_key[:8] + "..." + env_var_key[-4:] if len(env_var_key) > 12 else "***"
+                print(f"{GREEN}✓ Using API key from {env_key} ({masked}){RESET}")
+                break
+
+            # No existing key - must enter one
+            api_key = get_password_input(f"{CYAN}Enter your {provider.upper()} API key (empty to go back): {RESET}")
+            if not api_key:
+                step = "model"  # Go back
+                continue
+            break
 
     # Build api_keys dict, preserving keys from other providers
     api_keys = existing_config.get("api_keys", {}).copy() if existing_config else {}
