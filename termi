@@ -30,7 +30,7 @@ PROVIDERS = {
         "requires_key": True
     },
     "anthropic": {
-        "suggested_models": ["claude-sonnet-4-5-20250514", "claude-3-5-haiku-latest", "claude-opus-4-5-20251101"],
+        "suggested_models": ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-5"],
         "api_url": "https://api.anthropic.com/v1/messages",
         "env_key": "ANTHROPIC_API_KEY",
         "requires_key": True
