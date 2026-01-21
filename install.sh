@@ -7,26 +7,34 @@ set -e
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 REPO="archit0/homebrew-termi"
 
-echo "Installing Termi..."
+echo ""
+echo "  ⚡ Termi Installer"
+echo "  ─────────────────────────────────"
+echo ""
 
 # Check for Python 3
+echo "  [1/4] Checking Python 3..."
 if ! command -v python3 &> /dev/null; then
-    echo "Error: Python 3 is required but not installed."
+    echo "  ✗ Error: Python 3 is required but not installed."
     exit 1
 fi
+echo "  ✓ Python 3 found: $(python3 --version)"
 
 # Check for pip
+echo "  [2/4] Checking pip..."
 if ! python3 -m pip --version &> /dev/null; then
-    echo "Error: pip is required but not installed."
+    echo "  ✗ Error: pip is required but not installed."
     exit 1
 fi
+echo "  ✓ pip found"
 
 # Install requests dependency
-echo "Installing Python dependencies..."
-python3 -m pip install --quiet requests
+echo "  [3/4] Installing Python dependencies..."
+python3 -m pip install --quiet --user requests
+echo "  ✓ Dependencies installed"
 
 # Download termi
-echo "Downloading termi..."
+echo "  [4/4] Downloading termi..."
 TEMP_FILE=$(mktemp)
 curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/termi" -o "$TEMP_FILE"
 
@@ -35,11 +43,21 @@ if [ -w "$INSTALL_DIR" ]; then
     mv "$TEMP_FILE" "$INSTALL_DIR/termi"
     chmod +x "$INSTALL_DIR/termi"
 else
-    echo "Need sudo to install to $INSTALL_DIR"
+    echo "  → Need sudo to install to $INSTALL_DIR"
     sudo mv "$TEMP_FILE" "$INSTALL_DIR/termi"
     sudo chmod +x "$INSTALL_DIR/termi"
 fi
+echo "  ✓ Installed to $INSTALL_DIR/termi"
 
 echo ""
-echo "Termi installed successfully!"
-echo "Run 'termi' to get started."
+echo "  ─────────────────────────────────"
+echo "  ✓ Termi installed successfully!"
+echo ""
+echo "  Get started:"
+echo "    termi              # Interactive mode + setup"
+echo "    termi list files   # Run a command"
+echo ""
+echo "  Options:"
+echo "    termi --config     # Change LLM provider"
+echo "    termi --help       # Show help"
+echo ""
