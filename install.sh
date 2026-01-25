@@ -32,12 +32,16 @@ echo "  ✓ pip found"
 
 # Install requests dependency
 echo "  [3/4] Installing Python dependencies..."
-if [ "$(id -u)" -eq 0 ]; then
-    python3 -m pip install --quiet requests
+if python3 -c "import requests" &> /dev/null; then
+    echo "  ✓ Dependencies already installed"
+elif command -v apt &> /dev/null; then
+    sudo apt install -y python3-requests > /dev/null 2>&1
+    echo "  ✓ Dependencies installed"
 else
+    python3 -m pip install --quiet --break-system-packages requests 2>/dev/null || \
     python3 -m pip install --quiet --user requests
+    echo "  ✓ Dependencies installed"
 fi
-echo "  ✓ Dependencies installed"
 
 # Download termi
 echo "  [4/4] Downloading termi..."
