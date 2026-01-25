@@ -24,19 +24,34 @@ echo "  ✓ Python 3 found: $(python3 --version)"
 echo "  [2/4] Checking pip..."
 if ! python3 -m pip --version &> /dev/null; then
     echo "  ✗ Error: pip is required but not installed."
+    echo "    On Ubuntu/Debian: sudo apt install python3-pip"
+    echo "    On Fedora: sudo dnf install python3-pip"
     exit 1
 fi
 echo "  ✓ pip found"
 
 # Install requests dependency
 echo "  [3/4] Installing Python dependencies..."
-python3 -m pip install --quiet --user requests
+if [ "$(id -u)" -eq 0 ]; then
+    python3 -m pip install --quiet requests
+else
+    python3 -m pip install --quiet --user requests
+fi
 echo "  ✓ Dependencies installed"
 
 # Download termi
 echo "  [4/4] Downloading termi..."
 TEMP_FILE=$(mktemp)
 curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/termi" -o "$TEMP_FILE"
+
+# Ensure INSTALL_DIR exists
+if [ ! -d "$INSTALL_DIR" ]; then
+    if [ -w "$(dirname "$INSTALL_DIR")" ]; then
+        mkdir -p "$INSTALL_DIR"
+    else
+        sudo mkdir -p "$INSTALL_DIR"
+    fi
+fi
 
 # Install to INSTALL_DIR
 if [ -w "$INSTALL_DIR" ]; then
