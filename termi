@@ -79,6 +79,54 @@ User: "delete everything"
 User: "rm -rf /"
 {"commands": [], "unsafe": true}"""
 
+AGENTIC_SYSTEM_PROMPT = """You are an autonomous command-line agent. You execute shell commands ONE AT A TIME, observe the output, and decide your next action.
+
+Your goal is given by the user. Work step-by-step:
+1. Analyze the current state and what you know
+2. Decide on ONE command to run next
+3. Observe the output
+4. Decide: run another command OR mark as complete
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{
+  "command": {"cmd": "command here", "desc": "why running this"},
+  "reasoning": "brief explanation of your thinking",
+  "status": "in_progress"
+}
+
+When you have completed the goal:
+{
+  "command": null,
+  "reasoning": "explanation of what was accomplished",
+  "status": "complete"
+}
+
+Status values:
+- "in_progress": Need to run more commands
+- "complete": Goal achieved, no more commands needed
+- "error": Cannot proceed (explain in reasoning)
+- "unsafe": Request involves dangerous operations
+
+Rules:
+1. Return ONLY ONE command at a time (or null if done)
+2. Be conservative - prefer safe, non-destructive commands
+3. Use the output from previous commands to inform your next action
+4. If a command fails, analyze the error and adapt
+5. Set status to "unsafe" for dangerous requests (rm -rf /, etc.)
+6. Set status to "complete" when the goal is achieved
+7. Always explain your reasoning
+
+Example - User goal: "find the largest file in the current directory"
+
+Step 1 response:
+{"command": {"cmd": "ls -la", "desc": "List files to see what's here"}, "reasoning": "First, I need to see what files exist", "status": "in_progress"}
+
+After seeing output, Step 2 response:
+{"command": {"cmd": "du -sh * | sort -hr | head -5", "desc": "Find largest items"}, "reasoning": "Now sorting by size to find the largest", "status": "in_progress"}
+
+After seeing output, Step 3 response:
+{"command": null, "reasoning": "Found that 'node_modules' is the largest at 245M", "status": "complete"}"""
+
 # Terminal colors
 CYAN = "\033[96m"
 GREEN = "\033[92m"
@@ -943,6 +991,361 @@ def execute_command(command):
         return 1
 
 
+def execute_command_with_capture(command):
+    """Execute a shell command and return full result for agentic mode."""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        return {
+            "command": command,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.returncode,
+            "success": result.returncode == 0
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "command": command,
+            "stdout": "",
+            "stderr": "Command timed out after 120 seconds",
+            "exit_code": -1,
+            "success": False
+        }
+    except Exception as e:
+        return {
+            "command": command,
+            "stdout": "",
+            "stderr": str(e),
+            "exit_code": -1,
+            "success": False
+        }
+
+
+def build_agentic_prompt(goal, history):
+    """Build the prompt for agentic mode including execution history."""
+    prompt = f"GOAL: {goal}\n\n"
+
+    if history:
+        prompt += "EXECUTION HISTORY:\n"
+        for i, entry in enumerate(history, 1):
+            prompt += f"\n--- Step {i} ---\n"
+            prompt += f"Command: {entry['command']}\n"
+            prompt += f"Exit code: {entry['exit_code']}\n"
+            if entry['stdout']:
+                # Truncate very long outputs
+                stdout = entry['stdout']
+                if len(stdout) > 2000:
+                    stdout = stdout[:1000] + "\n... (truncated) ...\n" + stdout[-500:]
+                prompt += f"Output:\n{stdout}\n"
+            if entry['stderr']:
+                stderr = entry['stderr']
+                if len(stderr) > 1000:
+                    stderr = stderr[:500] + "\n... (truncated) ...\n" + stderr[-200:]
+                prompt += f"Stderr:\n{stderr}\n"
+        prompt += "\n"
+
+    prompt += "What is your next action? Remember: return ONE command or null if complete."
+    return prompt
+
+
+def call_llm_agentic(config, prompt):
+    """Call LLM with agentic system prompt."""
+    try:
+        if config["provider"] == "openai":
+            return call_openai_agentic(config, prompt)
+        elif config["provider"] == "anthropic":
+            return call_anthropic_agentic(config, prompt)
+        elif config["provider"] == "ollama":
+            return call_ollama_agentic(config, prompt)
+        else:
+            return None
+    except Exception as e:
+        print(f"{RED}Error calling LLM: {e}{RESET}")
+        return None
+
+
+def call_openai_agentic(config, prompt):
+    """Call OpenAI API for agentic mode."""
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": config["model"],
+        "messages": [
+            {"role": "system", "content": AGENTIC_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "agentic_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "cmd": {"type": "string"},
+                                        "desc": {"type": "string"}
+                                    },
+                                    "required": ["cmd", "desc"],
+                                    "additionalProperties": False
+                                },
+                                {"type": "null"}
+                            ]
+                        },
+                        "reasoning": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["in_progress", "complete", "error", "unsafe"]
+                        }
+                    },
+                    "required": ["command", "reasoning", "status"],
+                    "additionalProperties": False
+                }
+            }
+        }
+    }
+
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=data,
+        timeout=30
+    )
+
+    if response.status_code != 200:
+        return None
+
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def call_anthropic_agentic(config, prompt):
+    """Call Anthropic API for agentic mode."""
+    headers = {
+        "x-api-key": config["api_key"],
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01"
+    }
+    data = {
+        "model": config["model"],
+        "max_tokens": 1024,
+        "system": AGENTIC_SYSTEM_PROMPT,
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "{"}
+        ]
+    }
+
+    response = requests.post(
+        PROVIDERS["anthropic"]["api_url"],
+        headers=headers,
+        json=data,
+        timeout=30
+    )
+
+    if response.status_code != 200:
+        return None
+
+    return "{" + response.json()["content"][0]["text"].strip()
+
+
+def call_ollama_agentic(config, prompt):
+    """Call Ollama API for agentic mode."""
+    data = {
+        "model": config["model"],
+        "messages": [
+            {"role": "system", "content": AGENTIC_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": 0,
+            "num_predict": 800
+        }
+    }
+
+    response = requests.post(
+        PROVIDERS["ollama"]["api_url"],
+        json=data,
+        timeout=120
+    )
+
+    if response.status_code != 200:
+        return None
+
+    return clean_llm_response(response.json()["message"]["content"].strip())
+
+
+def parse_agentic_response(text):
+    """Parse the agentic LLM response."""
+    text = clean_llm_response(text)
+
+    try:
+        data = json.loads(text)
+
+        command = data.get("command")
+        reasoning = data.get("reasoning", "")
+        status = data.get("status", "in_progress")
+
+        # Normalize command
+        if command and isinstance(command, dict):
+            command = {
+                "cmd": command.get("cmd", ""),
+                "desc": command.get("desc", "")
+            }
+        else:
+            command = None
+
+        return {
+            "command": command,
+            "reasoning": reasoning,
+            "status": status
+        }
+
+    except json.JSONDecodeError:
+        return {
+            "command": None,
+            "reasoning": "Failed to parse LLM response",
+            "status": "error"
+        }
+
+
+def agentic_mode(config, goal, max_iterations=50):
+    """Run in agentic mode - execute commands iteratively based on output."""
+    print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
+    print(f"{BOLD}{CYAN}  🤖 Termi Agentic Mode{RESET}")
+    print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
+    print(f"\n{BOLD}Goal:{RESET} {goal}\n")
+
+    # Load permissions
+    auto_execute_all = config.get("auto_execute_all", False)
+    allowed_prefixes = set(config.get("allowed_prefixes", []))
+
+    history = []
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+        print(f"\n{CYAN}{'─' * 40}{RESET}")
+        print(f"{BOLD}Step {iteration}{RESET}")
+
+        # Build prompt with history
+        prompt = build_agentic_prompt(goal, history)
+
+        # Get next action from LLM
+        print(f"{DIM}Thinking...{RESET}")
+        raw_response = call_llm_agentic(config, prompt)
+
+        if raw_response is None:
+            print(f"{RED}✗ Failed to get response from LLM{RESET}")
+            break
+
+        response = parse_agentic_response(raw_response)
+
+        # Show reasoning
+        print(f"\n{YELLOW}Reasoning:{RESET} {response['reasoning']}")
+
+        # Check status
+        if response["status"] == "complete":
+            print(f"\n{GREEN}{'═' * 50}{RESET}")
+            print(f"{GREEN}✓ Goal completed!{RESET}")
+            print(f"{GREEN}{'═' * 50}{RESET}")
+            return True
+
+        if response["status"] == "error":
+            print(f"\n{RED}✗ Agent encountered an error: {response['reasoning']}{RESET}")
+            return False
+
+        if response["status"] == "unsafe":
+            print(f"\n{RED}✗ Request declined: potentially unsafe operation{RESET}")
+            return False
+
+        # Get the command
+        command = response.get("command")
+        if not command or not command.get("cmd"):
+            print(f"{YELLOW}No command to execute. Treating as complete.{RESET}")
+            return True
+
+        cmd_str = command["cmd"]
+        cmd_desc = command.get("desc", "")
+
+        # Display command
+        print(f"\n{BOLD}Command:{RESET} {CYAN}{cmd_str}{RESET}")
+        if cmd_desc:
+            print(f"{DIM}({cmd_desc}){RESET}")
+
+        # Check permissions and confirm
+        if check_command_allowed(cmd_str, allowed_prefixes, auto_execute_all):
+            print(f"{DIM}(Auto-allowed){RESET}")
+            should_execute = True
+        else:
+            execute, prefix, allow_all = confirm_command_execution(cmd_str, allowed_prefixes)
+
+            if allow_all:
+                auto_execute_all = True
+                update_permissions(config, auto_execute_all=True)
+                print(f"{GREEN}✓ Auto-execute ALL enabled{RESET}")
+
+            if prefix:
+                allowed_prefixes.add(prefix)
+                update_permissions(config, allowed_prefixes=list(allowed_prefixes))
+                print(f"{GREEN}✓ Always allowing '{prefix}...'{RESET}")
+
+            should_execute = execute
+
+        if not should_execute:
+            print(f"{YELLOW}Command skipped by user.{RESET}")
+            # Add to history as skipped
+            history.append({
+                "command": cmd_str,
+                "stdout": "",
+                "stderr": "Command skipped by user",
+                "exit_code": -1
+            })
+
+            if not interactive_confirm("Continue with agent?", default=True):
+                print(f"{DIM}Agent stopped.{RESET}")
+                return False
+            continue
+
+        # Execute and capture output
+        print(f"\n{DIM}Executing...{RESET}")
+        result = execute_command_with_capture(cmd_str)
+
+        # Display output
+        if result["stdout"]:
+            print(f"\n{result['stdout']}", end="")
+        if result["stderr"]:
+            print(f"{YELLOW}{result['stderr']}{RESET}", end="")
+
+        if result["exit_code"] != 0:
+            print(f"\n{YELLOW}⚠ Exit code: {result['exit_code']}{RESET}")
+
+        # Add to history
+        history.append({
+            "command": cmd_str,
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "exit_code": result["exit_code"]
+        })
+
+    print(f"\n{YELLOW}⚠ Reached iteration limit ({max_iterations}){RESET}")
+    print(f"{DIM}The agent ran many steps without completing. Use --max-iterations to increase if needed.{RESET}")
+    return False
+
+
 def get_command_prefix(cmd):
     """Extract a meaningful prefix from a command for allowlisting."""
     parts = cmd.strip().split()
@@ -1036,7 +1439,7 @@ def interactive_mode(config):
     print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
     print(f"{BOLD}{CYAN}  ⚡ Termi Interactive Mode{RESET}")
     print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
-    print(f"{DIM}Type natural language commands, 'exit' to quit, 'permissions' to manage auto-execute{RESET}\n")
+    print(f"{DIM}Type commands, 'agent: <goal>' for agentic mode, 'exit' to quit{RESET}\n")
 
     # Load permissions from config
     auto_execute_all = config.get("auto_execute_all", False)
@@ -1088,6 +1491,18 @@ def interactive_mode(config):
                         print(f"  {GREEN}✓{RESET} {p}...")
                 else:
                     print(f"{DIM}No auto-execute rules set{RESET}")
+                continue
+
+            # Check for agent: prefix
+            if user_input.lower().startswith("agent:"):
+                goal = user_input[6:].strip()
+                if not goal:
+                    print(f"{YELLOW}Please provide a goal. Example: agent: cleanup temp files{RESET}")
+                    continue
+                agentic_mode(config, goal)
+                # Reload permissions after agentic mode (they may have changed)
+                auto_execute_all = config.get("auto_execute_all", False)
+                allowed_prefixes = set(config.get("allowed_prefixes", []))
                 continue
 
             # Translate to commands
@@ -1183,24 +1598,33 @@ def main():
 {BOLD}Termi - Natural Language Terminal{RESET}
 
 {CYAN}Usage:{RESET}
-  termi                     Start interactive mode (setup on first run)
-  termi <natural language>  Execute a natural language command
-  termi --config            Reconfigure settings
-  termi --permissions       Manage auto-execute permissions
-  termi --help              Show this help message
+  termi                       Start interactive mode (setup on first run)
+  termi <natural language>    Execute a natural language command
+  termi --agent <goal>        Run in agentic mode (iterative execution)
+  termi --config              Reconfigure settings
+  termi --permissions         Manage auto-execute permissions
+  termi --help                Show this help message
+
+{CYAN}Agentic mode:{RESET}
+  --agent, -a                 Enable agentic mode
+  --max-iterations N          Safety limit for iterations (default: 50)
+
+  Agentic mode executes commands one at a time, observes output,
+  and decides the next action. Runs until the goal is complete.
 
 {CYAN}Interactive commands:{RESET}
-  permissions               Open permissions management menu
-  reset                     Clear all auto-execute permissions
-  allowed                   Show current auto-execute rules
-  config                    Reconfigure LLM settings
-  exit                      Exit interactive mode
+  agent: <goal>               Run agentic task (e.g., "agent: cleanup temp files")
+  permissions                 Open permissions management menu
+  reset                       Clear all auto-execute permissions
+  allowed                     Show current auto-execute rules
+  config                      Reconfigure LLM settings
+  exit                        Exit interactive mode
 
 {CYAN}Examples:{RESET}
   termi list all files
   termi show me disk usage
-  termi find all python files in src folder
-  termi count lines in all javascript files
+  termi --agent "find and delete all .pyc files"
+  termi --agent "organize files by extension"
         """)
         return
 
@@ -1209,6 +1633,31 @@ def main():
 
     if config is None:
         config = interactive_setup()
+
+    # Handle --agent flag
+    is_agentic = "--agent" in args or "-a" in args
+    if is_agentic:
+        # Extract max iterations (safety limit)
+        max_iterations = 50
+        if "--max-iterations" in args:
+            try:
+                idx = args.index("--max-iterations")
+                max_iterations = int(args[idx + 1])
+                args = args[:idx] + args[idx + 2:]  # Remove flag and value
+            except (ValueError, IndexError):
+                print(f"{YELLOW}Warning: Invalid --max-iterations value, using default (50){RESET}")
+
+        # Remove agent flags
+        args = [a for a in args if a not in ("--agent", "-a")]
+
+        if not args:
+            print(f"{RED}Error: No goal provided for agentic mode{RESET}")
+            print(f"{DIM}Usage: termi --agent <your goal>{RESET}")
+            sys.exit(1)
+
+        goal = " ".join(args)
+        success = agentic_mode(config, goal, max_iterations)
+        sys.exit(0 if success else 1)
 
     # If no arguments, run interactive mode
     if not args:
