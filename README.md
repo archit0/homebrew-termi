@@ -1,102 +1,180 @@
-# Termi
+# Termi - Free AI Terminal & Natural Language Shell
 
-A natural language terminal command executor. Translate plain English into shell commands using LLM APIs.
+> **Free and open-source AI terminal** - The open alternative to Claude Code, Copilot CLI, and AI command-line tools. Use natural language to execute shell commands with GPT, Claude, or local LLMs.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+
+## What is Termi?
+
+Termi is a **free AI terminal assistant** that translates plain English into shell commands. Think of it as an **open-source Claude Code alternative** or **free Copilot CLI** that works with multiple AI providers.
+
+```bash
+$ termi find all large files and show disk usage
+# AI suggests: du -ah . | sort -rh | head -20
+# You approve, it executes!
+```
+
+### Why Termi?
+
+- **Free & Open Source** - No subscription required, bring your own API key
+- **Works Offline** - Use with Ollama for completely local AI terminal
+- **Multi-Provider** - OpenAI (GPT-4, GPT-5), Anthropic (Claude), or Ollama (Llama, Mistral)
+- **Agentic Mode** - AI executes commands iteratively until your goal is complete
+- **Safe by Default** - Review commands before execution, dangerous commands are blocked
 
 ## Features
 
-- **Natural Language to Shell**: Convert commands like "list all files" to `ls -la`
-- **Multiple LLM Providers**: Support for OpenAI, Anthropic (Claude), and Ollama (local)
-- **Multi-Command Support**: Handle complex requests like "go to /tmp and create folder test"
-- **Smart Permissions**: Auto-execute trusted commands with granular prefix-based allowlisting
-- **Interactive Setup**: Arrow-key driven configuration with secure API key storage
-- **Safety First**: Dangerous commands are flagged and require confirmation
+- **Natural Language to Shell**: "list all files" → `ls -la`
+- **Agentic Mode**: AI works autonomously - runs commands, sees output, decides next steps
+- **Multiple LLM Providers**: OpenAI, Anthropic (Claude), Ollama (local/free)
+- **Smart Permissions**: Auto-execute trusted commands with prefix-based allowlisting
+- **Interactive Mode**: REPL-style interface for continuous use
+- **Safety First**: Dangerous commands flagged, confirmation required
 
-## Installation
+## Quick Install
+
+### One-Line Install (macOS/Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/archit0/homebrew-termi/main/install.sh | bash
+```
 
 ### Homebrew (macOS)
 
 ```bash
-brew tap archit0/homebrew-termi
+brew tap archit0/termi
 brew install termi
 ```
 
-### Manual
+### Manual Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/archit0/homebrew-termi.git
-cd homebrew-termi
-
-# Install dependencies
 pip install requests
-
-# Make executable (optional)
-chmod +x termi
-
-# Add to PATH (optional)
-sudo ln -s $(pwd)/termi /usr/local/bin/termi
+curl -o /usr/local/bin/termi https://raw.githubusercontent.com/archit0/homebrew-termi/main/termi
+chmod +x /usr/local/bin/termi
 ```
 
 ## Quick Start
 
 ```bash
-# Run for the first time (starts interactive setup)
-./termi
+# First run - interactive setup (choose provider, enter API key)
+termi
 
-# Or run with a command directly
-./termi list all files
+# Run natural language commands
+termi list all files
+termi show disk usage
+termi find python files modified today
+
+# Agentic mode - AI works until goal is complete
+termi --agent "cleanup all node_modules folders"
+termi --agent "find and fix permission issues"
+termi --agent "setup a new git repo with README"
 ```
 
-## Configuration
+## Agentic Mode - Autonomous AI Terminal
 
-On first run, Termi will guide you through setup:
+Agentic mode lets the AI work **autonomously** - it runs a command, observes the output, and decides what to do next until your goal is achieved.
 
-1. **Select Provider**: OpenAI, Anthropic, or Ollama (local)
-2. **Choose Model**: Select from suggested models or enter custom
-3. **API Key**: Enter your API key (stored securely in `~/.termi/config.json`)
-
-To reconfigure:
 ```bash
-termi --config
+$ termi --agent "find the largest files taking up disk space"
+
+══════════════════════════════════════════════════
+  🤖 Termi Agentic Mode
+══════════════════════════════════════════════════
+
+Goal: find the largest files taking up disk space
+Model: ollama/llama3.2
+
+────────────────────────────────────────
+Step 1
+Tokens: 450 in / 85 out
+
+Reasoning: First, I'll check overall disk usage to understand the situation
+
+Command: df -h
+
+...output...
+
+────────────────────────────────────────
+Step 2
+Tokens: 520 in / 92 out
+
+Reasoning: Now I'll find the largest files in the current directory
+
+Command: du -ah . | sort -rh | head -20
+
+...output...
+
+══════════════════════════════════════════════════
+✓ Goal completed in 2 step(s)
+Total tokens: 970 in / 177 out (1147 total)
+══════════════════════════════════════════════════
 ```
 
-### Supported Providers
+### Agentic Mode Examples
 
-| Provider | Models | API Key Required |
-|----------|--------|------------------|
-| OpenAI | gpt-5.2, gpt-5-mini, gpt-5-nano, gpt-4o, gpt-4o-mini | Yes |
-| Anthropic | claude-sonnet-4-5, claude-haiku-4-5, claude-opus-4-5 | Yes |
-| Ollama | Any locally installed model | No |
+```bash
+# Cleanup tasks
+termi --agent "delete all .pyc files and __pycache__ folders"
+termi --agent "find and remove empty directories"
+
+# Investigation tasks
+termi --agent "find what's using port 3000"
+termi --agent "check why disk space is low"
+
+# Setup tasks
+termi --agent "initialize a new python project with venv"
+termi --agent "setup git hooks for this repo"
+```
+
+## Supported AI Providers
+
+| Provider | Models | Cost | Local |
+|----------|--------|------|-------|
+| **Ollama** | Llama 3, Mistral, CodeLlama, Phi | Free | Yes |
+| **OpenAI** | GPT-5, GPT-4o, GPT-4o-mini | Paid | No |
+| **Anthropic** | Claude Opus, Sonnet, Haiku | Paid | No |
+
+### Free Local AI (Ollama)
+
+Use Termi completely free with [Ollama](https://ollama.ai):
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a model
+ollama pull llama3.2
+
+# Configure Termi to use Ollama
+termi --config  # Select Ollama as provider
+```
 
 ## Usage
 
 ### Direct Commands
 
 ```bash
-# Basic commands
 termi list all files
-termi show disk usage
-termi find python files in src folder
-termi count lines in all javascript files
-
-# Multi-step commands
-termi go to /tmp and create a folder called test
-termi find large files and sort by size
-
-# With auto-execute flag
-termi -y list all files
+termi show memory usage
+termi find files larger than 100mb
+termi show git log with graph
+termi "compress logs folder to tar.gz"
 ```
 
 ### Interactive Mode
 
 ```bash
-# Start interactive mode
-termi
+$ termi
 
-# Inside interactive mode:
-termi❯ show me running processes
-termi❯ find files modified today
-termi❯ permissions    # manage auto-execute settings
+⚡ Termi Interactive Mode
+══════════════════════════════════════════════════
+
+termi❯ show running docker containers
+termi❯ find TODO comments in python files
+termi❯ agent: setup a new nodejs project    # agentic mode
+termi❯ permissions                           # manage auto-execute
 termi❯ exit
 ```
 
@@ -105,82 +183,37 @@ termi❯ exit
 | Option | Description |
 |--------|-------------|
 | `termi` | Start interactive mode |
-| `termi <command>` | Execute a natural language command |
-| `termi --config` or `-c` | Reconfigure settings |
-| `termi --permissions` or `-p` | Manage auto-execute permissions |
-| `termi --yes` or `-y` | Auto-execute without confirmation |
-| `termi --help` or `-h` | Show help message |
+| `termi <command>` | Execute natural language command |
+| `termi --agent <goal>` | Run in agentic mode |
+| `termi --config` | Configure LLM provider |
+| `termi --permissions` | Manage auto-execute rules |
+| `termi --help` | Show help |
 
-## Permissions
+## Permissions & Safety
 
-Termi lets you set up auto-execute rules for trusted commands.
+Termi includes safety features:
 
-### Managing Permissions
+- **Command Preview**: See commands before execution
+- **Dangerous Command Blocking**: `rm -rf /`, etc. are blocked
+- **Auto-Execute Rules**: Trust specific command prefixes
+- **Confirmation Required**: By default, you approve each command
 
 ```bash
-# From command line
+# Manage permissions
 termi --permissions
 
 # Or in interactive mode
 termi❯ permissions
 ```
 
-### Permission Options
+## Configuration
 
-- **Toggle auto-execute ALL**: Execute all commands without confirmation
-- **Add allowed prefix**: Auto-execute commands starting with specific prefix (e.g., `ls`, `git`)
-- **Remove/Clear prefixes**: Manage existing rules
-
-### How Prefixes Work
-
-When you choose "Always allow" for a command:
-- `ls -la` → allows all commands starting with `ls`
-- `sudo ps aux` → allows all commands starting with `sudo ps`
-- `git status` → allows all commands starting with `git`
-
-### Interactive Mode Commands
-
-| Command | Description |
-|---------|-------------|
-| `permissions` or `perms` | Open permissions manager |
-| `allowed` | Show current auto-execute rules |
-| `reset` | Clear all auto-execute permissions |
-| `config` | Reconfigure LLM settings |
-| `exit` or `quit` | Exit interactive mode |
-
-## Examples
-
-```bash
-# File operations
-termi list all hidden files
-termi find files larger than 100mb
-termi show the last 50 lines of app.log
-
-# System info
-termi show memory usage
-termi list running docker containers
-termi show my ip address
-
-# Git operations
-termi show git status
-termi show recent commits
-termi list branches
-
-# Complex operations
-termi find all TODO comments in python files
-termi compress the logs folder into a tar.gz
-termi show processes using port 3000
-```
-
-## Configuration File
-
-Settings are stored in `~/.termi/config.json`:
+Config stored in `~/.termi/config.json`:
 
 ```json
 {
-  "provider": "openai",
-  "model": "gpt-4o",
-  "api_key": "sk-...",
+  "provider": "ollama",
+  "model": "llama3.2",
   "api_keys": {
     "openai": "sk-...",
     "anthropic": "sk-ant-..."
@@ -190,26 +223,34 @@ Settings are stored in `~/.termi/config.json`:
 }
 ```
 
-API keys are stored per-provider, so switching providers preserves your keys.
+## Comparison
 
-## Safety
+| Feature | Termi | Claude Code | GitHub Copilot CLI |
+|---------|-------|-------------|-------------------|
+| Open Source | Yes | No | No |
+| Free Option | Yes (Ollama) | No | No |
+| Local/Offline | Yes | No | No |
+| Agentic Mode | Yes | Yes | No |
+| Multi-Provider | Yes | Claude only | GPT only |
 
-Termi includes safety measures:
-- Commands are shown before execution
-- Dangerous/destructive commands are flagged as unsafe
-- Confirmation required by default
-- Granular permission controls
+## Keywords
+
+AI terminal, AI CLI, natural language shell, GPT terminal, Claude terminal, free Claude Code alternative, open source Copilot CLI, AI command line, LLM terminal, natural language to bash, AI shell assistant, free AI coding assistant, Ollama terminal, local AI terminal, open source AI terminal, command line AI, terminal AI assistant, shell GPT, Claude CLI, GPT CLI, AI bash, intelligent terminal
 
 ## Requirements
 
 - Python 3.7+
 - `requests` library
-- API key for OpenAI/Anthropic, or local Ollama installation
+- API key (OpenAI/Anthropic) OR Ollama installed locally
 
 ## License
 
-MIT
+MIT License - Free for personal and commercial use.
 
 ## Contributing
 
-Contributions welcome! Please open an issue or submit a pull request.
+Contributions welcome! Open an issue or submit a PR.
+
+---
+
+**Star this repo** if you find it useful! It helps others discover this free AI terminal tool.
