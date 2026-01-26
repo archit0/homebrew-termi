@@ -1032,7 +1032,7 @@ def build_agentic_prompt(goal, history):
 
 
 def call_llm_agentic(config, prompt):
-    """Call LLM with agentic system prompt."""
+    """Call LLM with agentic system prompt. Returns (response_text, usage_dict)."""
     try:
         if config["provider"] == "openai":
             return call_openai_agentic(config, prompt)
@@ -1041,10 +1041,10 @@ def call_llm_agentic(config, prompt):
         elif config["provider"] == "ollama":
             return call_ollama_agentic(config, prompt)
         else:
-            return None
+            return None, None
     except Exception as e:
         print(f"{RED}Error calling LLM: {e}{RESET}")
-        return None
+        return None, None
 
 
 def call_openai_agentic(config, prompt):
@@ -1103,9 +1103,16 @@ def call_openai_agentic(config, prompt):
     )
 
     if response.status_code != 200:
-        return None
+        return None, None
 
-    return response.json()["choices"][0]["message"]["content"].strip()
+    resp_json = response.json()
+    usage = resp_json.get("usage", {})
+    token_usage = {
+        "input": usage.get("prompt_tokens", 0),
+        "output": usage.get("completion_tokens", 0),
+        "total": usage.get("total_tokens", 0)
+    }
+    return resp_json["choices"][0]["message"]["content"].strip(), token_usage
 
 
 def call_anthropic_agentic(config, prompt):
@@ -1133,9 +1140,16 @@ def call_anthropic_agentic(config, prompt):
     )
 
     if response.status_code != 200:
-        return None
+        return None, None
 
-    return "{" + response.json()["content"][0]["text"].strip()
+    resp_json = response.json()
+    usage = resp_json.get("usage", {})
+    token_usage = {
+        "input": usage.get("input_tokens", 0),
+        "output": usage.get("output_tokens", 0),
+        "total": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+    }
+    return "{" + resp_json["content"][0]["text"].strip(), token_usage
 
 
 def call_ollama_agentic(config, prompt):
@@ -1161,9 +1175,15 @@ def call_ollama_agentic(config, prompt):
     )
 
     if response.status_code != 200:
-        return None
+        return None, None
 
-    return clean_llm_response(response.json()["message"]["content"].strip())
+    resp_json = response.json()
+    token_usage = {
+        "input": resp_json.get("prompt_eval_count", 0),
+        "output": resp_json.get("eval_count", 0),
+        "total": resp_json.get("prompt_eval_count", 0) + resp_json.get("eval_count", 0)
+    }
+    return clean_llm_response(resp_json["message"]["content"].strip()), token_usage
 
 
 def parse_agentic_response(text):
@@ -1205,7 +1225,8 @@ def agentic_mode(config, goal, max_iterations=50):
     print(f"\n{BOLD}{CYAN}{'═' * 50}{RESET}")
     print(f"{BOLD}{CYAN}  🤖 Termi Agentic Mode{RESET}")
     print(f"{BOLD}{CYAN}{'═' * 50}{RESET}")
-    print(f"\n{BOLD}Goal:{RESET} {goal}\n")
+    print(f"\n{BOLD}Goal:{RESET} {goal}")
+    print(f"{DIM}Model: {config['provider']}/{config['model']}{RESET}\n")
 
     # Load permissions
     auto_execute_all = config.get("auto_execute_all", False)
@@ -1213,6 +1234,7 @@ def agentic_mode(config, goal, max_iterations=50):
 
     history = []
     iteration = 0
+    total_tokens = {"input": 0, "output": 0, "total": 0}
 
     while iteration < max_iterations:
         iteration += 1
@@ -1224,11 +1246,18 @@ def agentic_mode(config, goal, max_iterations=50):
 
         # Get next action from LLM
         print(f"{DIM}Thinking...{RESET}")
-        raw_response = call_llm_agentic(config, prompt)
+        raw_response, usage = call_llm_agentic(config, prompt)
 
         if raw_response is None:
             print(f"{RED}✗ Failed to get response from LLM{RESET}")
             break
+
+        # Track token usage
+        if usage:
+            total_tokens["input"] += usage.get("input", 0)
+            total_tokens["output"] += usage.get("output", 0)
+            total_tokens["total"] += usage.get("total", 0)
+            print(f"{DIM}Tokens: {usage.get('input', 0)} in / {usage.get('output', 0)} out{RESET}")
 
         response = parse_agentic_response(raw_response)
 
@@ -1238,16 +1267,19 @@ def agentic_mode(config, goal, max_iterations=50):
         # Check status
         if response["status"] == "complete":
             print(f"\n{GREEN}{'═' * 50}{RESET}")
-            print(f"{GREEN}✓ Goal completed!{RESET}")
+            print(f"{GREEN}✓ Goal completed in {iteration} step(s){RESET}")
+            print(f"{DIM}Total tokens: {total_tokens['input']} in / {total_tokens['output']} out ({total_tokens['total']} total){RESET}")
             print(f"{GREEN}{'═' * 50}{RESET}")
             return True
 
         if response["status"] == "error":
             print(f"\n{RED}✗ Agent encountered an error: {response['reasoning']}{RESET}")
+            print(f"{DIM}Total tokens: {total_tokens['total']}{RESET}")
             return False
 
         if response["status"] == "unsafe":
             print(f"\n{RED}✗ Request declined: potentially unsafe operation{RESET}")
+            print(f"{DIM}Total tokens: {total_tokens['total']}{RESET}")
             return False
 
         # Get the command
@@ -1320,6 +1352,7 @@ def agentic_mode(config, goal, max_iterations=50):
         })
 
     print(f"\n{YELLOW}⚠ Reached iteration limit ({max_iterations}){RESET}")
+    print(f"{DIM}Total tokens: {total_tokens['input']} in / {total_tokens['output']} out ({total_tokens['total']} total){RESET}")
     print(f"{DIM}The agent ran many steps without completing. Use --max-iterations to increase if needed.{RESET}")
     return False
 
