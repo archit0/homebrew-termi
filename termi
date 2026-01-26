@@ -79,53 +79,29 @@ User: "delete everything"
 User: "rm -rf /"
 {"commands": [], "unsafe": true}"""
 
-AGENTIC_SYSTEM_PROMPT = """You are an autonomous command-line agent. You execute shell commands ONE AT A TIME, observe the output, and decide your next action.
+AGENTIC_SYSTEM_PROMPT = """You are a command-line agent that executes shell commands to accomplish goals.
 
-Your goal is given by the user. Work step-by-step:
-1. Analyze the current state and what you know
-2. Decide on ONE command to run next
-3. Observe the output
-4. Decide: run another command OR mark as complete
+CRITICAL RULES:
+1. You MUST run at least one command before marking as complete
+2. Return ONE command at a time in JSON format
+3. Only set status "complete" AFTER you have actually done the work
+4. If no commands have been run yet, you MUST return a command
 
-IMPORTANT: Always respond with valid JSON in this exact format:
-{
-  "command": {"cmd": "command here", "desc": "why running this"},
-  "reasoning": "brief explanation of your thinking",
-  "status": "in_progress"
-}
+JSON FORMAT - Always respond with this exact structure:
+{"command": {"cmd": "shell command", "desc": "what it does"}, "reasoning": "why", "status": "in_progress"}
 
-When you have completed the goal:
-{
-  "command": null,
-  "reasoning": "explanation of what was accomplished",
-  "status": "complete"
-}
+When done (ONLY after running commands and achieving the goal):
+{"command": null, "reasoning": "what was accomplished", "status": "complete"}
 
 Status values:
-- "in_progress": Need to run more commands
-- "complete": Goal achieved, no more commands needed
-- "error": Cannot proceed (explain in reasoning)
-- "unsafe": Request involves dangerous operations
+- "in_progress": Need to run commands (use this when starting!)
+- "complete": Goal achieved after running commands
+- "error": Cannot proceed
+- "unsafe": Dangerous request (rm -rf /, etc.)
 
-Rules:
-1. Return ONLY ONE command at a time (or null if done)
-2. Be conservative - prefer safe, non-destructive commands
-3. Use the output from previous commands to inform your next action
-4. If a command fails, analyze the error and adapt
-5. Set status to "unsafe" for dangerous requests (rm -rf /, etc.)
-6. Set status to "complete" when the goal is achieved
-7. Always explain your reasoning
-
-Example - User goal: "find the largest file in the current directory"
-
-Step 1 response:
-{"command": {"cmd": "ls -la", "desc": "List files to see what's here"}, "reasoning": "First, I need to see what files exist", "status": "in_progress"}
-
-After seeing output, Step 2 response:
-{"command": {"cmd": "du -sh * | sort -hr | head -5", "desc": "Find largest items"}, "reasoning": "Now sorting by size to find the largest", "status": "in_progress"}
-
-After seeing output, Step 3 response:
-{"command": null, "reasoning": "Found that 'node_modules' is the largest at 245M", "status": "complete"}"""
+Example goal: "list files in current directory"
+Step 1: {"command": {"cmd": "ls -la", "desc": "List all files"}, "reasoning": "Running ls to list files", "status": "in_progress"}
+Step 2 (after seeing output): {"command": null, "reasoning": "Listed 5 files including README.md", "status": "complete"}"""
 
 # Terminal colors
 CYAN = "\033[96m"
@@ -1047,9 +1023,11 @@ def build_agentic_prompt(goal, history):
                 if len(stderr) > 1000:
                     stderr = stderr[:500] + "\n... (truncated) ...\n" + stderr[-200:]
                 prompt += f"Stderr:\n{stderr}\n"
-        prompt += "\n"
+        prompt += "\nWhat is your next action based on the output above?"
+    else:
+        prompt += "STATUS: No commands have been executed yet. You must start by running a command.\n"
+        prompt += "\nProvide your FIRST command to begin working on this goal."
 
-    prompt += "What is your next action? Remember: return ONE command or null if complete."
     return prompt
 
 
