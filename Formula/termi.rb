@@ -3,8 +3,8 @@ class Termi < Formula
 
   desc "Natural language terminal command executor using LLM APIs"
   homepage "https://github.com/archit0/homebrew-termi"
-  url "https://github.com/archit0/homebrew-termi/archive/refs/tags/v1.0.11.tar.gz"
-  sha256 "b57255e0079db66e4f7cfd4f318f64669fdda85106193979e364dc4d57e597ab"
+  url "https://github.com/archit0/homebrew-termi/archive/refs/tags/v1.0.12.tar.gz"
+  sha256 "48498814f945a950d752cd4d939ac78760e1fea2a7e2c07770372510ea2b285e"
   license "MIT"
 
   depends_on "python@3.12"
